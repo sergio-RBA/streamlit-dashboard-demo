@@ -494,7 +494,7 @@ def create_visualization(
 
 
 # ============================
-# Streamlit UI
+# App UI
 # ============================
 st.set_page_config(page_title="Sales/Cost Dashboard", layout="wide")
 st.title("Sales / Cost Dashboard")
@@ -542,132 +542,130 @@ if "sales_bytes" not in st.session_state or "cost_bytes" not in st.session_state
 Sales_base = pd.read_csv(io.BytesIO(st.session_state["sales_bytes"]))
 Cost_dated = pd.read_csv(io.BytesIO(st.session_state["cost_bytes"]))
 
-# Preview
-with st.expander("Preview: Sales.csv"):
-    st.dataframe(Sales_base.head(30), use_container_width=True)
-
-with st.expander("Preview: Cost_dated.csv"):
-    st.dataframe(Cost_dated.head(30), use_container_width=True)
 
 # ============================
-# AI Assistant (pinned input)
+# Two-column layout: dashboard left, AI right
 # ============================
-st.header("AI Assistant")
+left, right = st.columns([3, 1], gap="large")
 
-if "chat" not in st.session_state:
-    st.session_state.chat = []
+with left:
+    with st.expander("Preview: Sales.csv"):
+        st.dataframe(Sales_base.head(30), use_container_width=True)
 
-# Render chat history in a fixed-height box (messages scroll, input stays pinned)
-chat_box = st.container(height=280, border=True)
-with chat_box:
-    for m in st.session_state.chat:
-        with st.chat_message(m["role"]):
-            st.markdown(m["content"])
+    with st.expander("Preview: Cost_dated.csv"):
+        st.dataframe(Cost_dated.head(30), use_container_width=True)
 
-user_msg = st.chat_input("Ask a question about the data… (e.g., “Which month has the most sales?”)")
-
-if user_msg:
-    st.session_state.chat.append({"role": "user", "content": user_msg})
-    with chat_box:
-        with st.chat_message("user"):
-            st.markdown(user_msg)
-
-    # Build a small, useful summary for the model (includes monthly totals)
     try:
-        s = Sales_base.copy()
-        s_date_col = _find_date_column(s, default="Date")
-        s["Date"] = parse_dates_no_warning(s[s_date_col])
-        s["YearMonth"] = s["Date"].dt.to_period("M").astype(str)
-
-        s["Qty"] = pd.to_numeric(s["Qty"], errors="coerce").fillna(0.0)
-        s["UnitPrice"] = pd.to_numeric(s["UnitPrice"], errors="coerce")
-        s["Revenue"] = s["Qty"] * s["UnitPrice"]
-
-        monthly_sales = (
-            s.groupby("YearMonth", dropna=False)["Revenue"].sum()
-            .reset_index()
-            .sort_values("Revenue", ascending=False)
-            .head(24)
-            .to_dict(orient="records")
+        fig = create_visualization(
+            Sales_base=Sales_base,
+            Cost_dated=Cost_dated,
+            cost_method=cost_method,
+            view_type=view_type,
+            metric_type=metric_type,
         )
-    except Exception:
-        monthly_sales = []
+        st.pyplot(fig, clear_figure=True, use_container_width=True)
+    except Exception as e:
+        st.error(f"Dashboard error: {e}")
 
-    summary = {
-        "toggles": {"cost_method": cost_method, "view_type": view_type, "metric_type": metric_type},
-        "sales_columns": list(Sales_base.columns),
-        "cost_columns": list(Cost_dated.columns),
-        "sales_rows": int(len(Sales_base)),
-        "cost_rows": int(len(Cost_dated)),
-        "monthly_sales_top": monthly_sales,  # helps answer “which month has most sales”
-    }
+with right:
+    st.subheader("AI Assistant")
 
-    if "OPENAI_API_KEY" not in st.secrets:
-        msg = "Add `OPENAI_API_KEY` in Streamlit **Secrets** to enable chat responses."
-        st.session_state.chat.append({"role": "assistant", "content": msg})
+    if "chat" not in st.session_state:
+        st.session_state.chat = []
+
+    chat_box = st.container(height=520, border=True)
+    with chat_box:
+        for m in st.session_state.chat:
+            with st.chat_message(m["role"]):
+                st.markdown(m["content"])
+
+    # IMPORTANT: only ONE st.chat_input per page
+    user_msg = st.chat_input("Ask about the data…")
+
+    if user_msg:
+        st.session_state.chat.append({"role": "user", "content": user_msg})
         with chat_box:
-            with st.chat_message("assistant"):
-                st.markdown(msg)
-    else:
+            with st.chat_message("user"):
+                st.markdown(user_msg)
+
+        # Build helpful summary (monthly totals)
         try:
-            from openai import OpenAI
+            s = Sales_base.copy()
+            s_date_col = _find_date_column(s, default="Date")
+            s["Date"] = parse_dates_no_warning(s[s_date_col])
+            s["YearMonth"] = s["Date"].dt.to_period("M").astype(str)
 
-            client = OpenAI(api_key=st.secrets["OPENAI_API_KEY"])
-            model = st.secrets.get("OPENAI_MODEL", "gpt-5.1")
+            s["Qty"] = pd.to_numeric(s["Qty"], errors="coerce").fillna(0.0)
+            s["UnitPrice"] = pd.to_numeric(s["UnitPrice"], errors="coerce")
+            s["Revenue"] = s["Qty"] * s["UnitPrice"]
 
-            system = (
-                "You are a data assistant for a sales/cost dashboard. "
-                "Answer using ONLY the provided summary. "
-                "If you need missing columns, say exactly which."
+            monthly_sales = (
+                s.groupby("YearMonth", dropna=False)["Revenue"].sum()
+                .reset_index()
+                .sort_values("Revenue", ascending=False)
+                .to_dict(orient="records")
             )
+        except Exception:
+            monthly_sales = []
 
-            resp = client.responses.create(
-                model=model,
-                input=[
-                    {"role": "system", "content": system},
-                    {"role": "user", "content": f"QUESTION:\n{user_msg}\n\nSUMMARY:\n{summary}"},
-                ],
-            )
+        summary = {
+            "toggles": {"cost_method": cost_method, "view_type": view_type, "metric_type": metric_type},
+            "sales_columns": list(Sales_base.columns),
+            "cost_columns": list(Cost_dated.columns),
+            "sales_rows": int(len(Sales_base)),
+            "cost_rows": int(len(Cost_dated)),
+            "monthly_sales": monthly_sales,
+        }
 
-            answer = getattr(resp, "output_text", None) or "No response text returned."
-            st.session_state.chat.append({"role": "assistant", "content": answer})
+        if "OPENAI_API_KEY" not in st.secrets:
+            msg = "Add `OPENAI_API_KEY` in Streamlit **Secrets** to enable chat responses."
+            st.session_state.chat.append({"role": "assistant", "content": msg})
             with chat_box:
                 with st.chat_message("assistant"):
-                    st.markdown(answer)
+                    st.markdown(msg)
+        else:
+            try:
+                from openai import OpenAI
 
-        except Exception as e:
-            err = str(e)
+                client = OpenAI(api_key=st.secrets["OPENAI_API_KEY"])
+                model = st.secrets.get("OPENAI_MODEL", "gpt-5.1")
 
-            # Friendly invalid-key handling
-            if "401" in err or "invalid_api_key" in err:
-                friendly = (
-                    "Your OpenAI key is invalid (401). In Streamlit Secrets, set:\n\n"
-                    "```\nOPENAI_API_KEY = \"sk-...your real key...\"\nOPENAI_MODEL = \"gpt-5.1\"\n```\n"
-                    "Common issue: you left the placeholder `sk-xxxx` or copied an incomplete key."
+                system = (
+                    "You are a data assistant for a sales/cost dashboard. "
+                    "Answer using ONLY the provided summary. "
+                    "If you need missing columns, say exactly which."
                 )
-                st.session_state.chat.append({"role": "assistant", "content": friendly})
+
+                resp = client.responses.create(
+                    model=model,
+                    input=[
+                        {"role": "system", "content": system},
+                        {"role": "user", "content": f"QUESTION:\n{user_msg}\n\nSUMMARY:\n{summary}"},
+                    ],
+                )
+
+                answer = getattr(resp, "output_text", None) or "No response text returned."
+                st.session_state.chat.append({"role": "assistant", "content": answer})
                 with chat_box:
                     with st.chat_message("assistant"):
-                        st.markdown(friendly)
-            else:
-                st.session_state.chat.append({"role": "assistant", "content": f"AI error: {e}"})
-                with chat_box:
-                    with st.chat_message("assistant"):
-                        st.markdown(f"AI error: {e}")
+                        st.markdown(answer)
 
-st.divider()
+            except Exception as e:
+                err = str(e)
 
-# ============================
-# Dashboard chart
-# ============================
-try:
-    fig = create_visualization(
-        Sales_base=Sales_base,
-        Cost_dated=Cost_dated,
-        cost_method=cost_method,
-        view_type=view_type,
-        metric_type=metric_type,
-    )
-    st.pyplot(fig, clear_figure=True, use_container_width=True)
-except Exception as e:
-    st.error(f"Dashboard error: {e}")
+                # Friendly invalid-key handling
+                if "401" in err or "invalid_api_key" in err:
+                    friendly = (
+                        "Your OpenAI key is invalid (401). In Streamlit Secrets, set:\n\n"
+                        "```\nOPENAI_API_KEY = \"sk-...your real key...\"\nOPENAI_MODEL = \"gpt-5.1\"\n```\n"
+                        "Common issue: you left the placeholder `sk-xxxx` or copied an incomplete key."
+                    )
+                    st.session_state.chat.append({"role": "assistant", "content": friendly})
+                    with chat_box:
+                        with st.chat_message("assistant"):
+                            st.markdown(friendly)
+                else:
+                    st.session_state.chat.append({"role": "assistant", "content": f"AI error: {e}"})
+                    with chat_box:
+                        with st.chat_message("assistant"):
+                            st.markdown(f"AI error: {e}")
