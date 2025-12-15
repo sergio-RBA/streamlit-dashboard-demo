@@ -90,7 +90,6 @@ def create_visualization(
     monthly_cost["MovingAvgCost"] = (cum_sum / month_number).astype("float64")
 
     tmp = monthly_cost.reset_index()
-    # Safety: if pandas calls it 'index' instead of 'YearMonth'
     if "YearMonth" not in tmp.columns and "index" in tmp.columns:
         tmp = tmp.rename(columns={"index": "YearMonth"})
     moving_avg_cost_df = tmp[["YearMonth", "MovingAvgCost"]]
@@ -106,7 +105,7 @@ def create_visualization(
         Sales_temp["TotalCost"] = Sales_temp["Qty"] * Sales_temp["MovingAvgCost"]
         Sales_temp["NetProfit"] = Sales_temp["Revenue"] - Sales_temp["TotalCost"]
 
-    # ----- Styling (kept from your code) -----
+    # ----- Styling -----
     region_order = ["North", "East", "West", "South"]
     revenue_colors = {"North": "#00CED1", "East": "#DC143C", "West": "#1E90FF", "South": "#FF8C00"}
     cost_colors    = {"North": "#A9A9A9", "East": "#808080", "West": "#696969", "South": "#C0C0C0"}
@@ -509,3 +508,78 @@ try:
     st.pyplot(fig, clear_figure=True, use_container_width=True)
 except Exception as e:
     st.error(f"Dashboard error: {e}")
+    st.stop()
+
+# ----------------------------
+# AI Chat (OpenAI)
+# ----------------------------
+st.divider()
+st.header("AI Assistant")
+
+# NOTE:
+# 1) Add "openai" to requirements.txt
+# 2) In Streamlit Cloud -> App -> Settings -> Secrets, add:
+#    OPENAI_API_KEY="your_key"
+#    OPENAI_MODEL="gpt-4.1-mini"   (or whatever you want)
+if "OPENAI_API_KEY" not in st.secrets:
+    st.info("To enable chat: add OPENAI_API_KEY in Streamlit Secrets (App settings → Secrets).")
+else:
+    from openai import OpenAI
+
+    client = OpenAI(api_key=st.secrets["OPENAI_API_KEY"])
+    model = st.secrets.get("OPENAI_MODEL", "gpt-4.1-mini")
+
+    if "chat" not in st.session_state:
+        st.session_state.chat = []
+
+    for m in st.session_state.chat:
+        with st.chat_message(m["role"]):
+            st.markdown(m["content"])
+
+    # IMPORTANT: only ONE st.chat_input per page, and keep it in the main area (not sidebar)
+    user_msg = st.chat_input("Ask a question about the dashboard/data…")
+
+    if user_msg:
+        st.session_state.chat.append({"role": "user", "content": user_msg})
+        with st.chat_message("user"):
+            st.markdown(user_msg)
+
+        # Keep it lightweight: send summary + samples (not whole CSV)
+        summary = {
+            "sales_columns": list(Sales_base.columns),
+            "cost_columns": list(Cost_dated.columns),
+            "sales_rows": int(len(Sales_base)),
+            "cost_rows": int(len(Cost_dated)),
+            "sales_head": Sales_base.head(25).to_dict(orient="records"),
+            "cost_head": Cost_dated.head(25).to_dict(orient="records"),
+            "sales_numeric_describe": Sales_base.select_dtypes("number").describe().to_dict(),
+            "cost_numeric_describe": Cost_dated.select_dtypes("number").describe().to_dict(),
+            "toggles": {"cost_method": cost_method, "view_type": view_type, "metric_type": metric_type},
+        }
+
+        system = (
+            "You are a data assistant for a sales/cost dashboard. "
+            "Answer using only the provided data summary. "
+            "If the question needs extra columns/rows not included, ask for what you need."
+        )
+
+        try:
+            resp = client.responses.create(
+                model=model,
+                input=[
+                    {"role": "system", "content": system},
+                    {"role": "user", "content": f"QUESTION:\n{user_msg}\n\nDATA SUMMARY:\n{summary}"},
+                ],
+            )
+
+            # Robust output extraction
+            answer = getattr(resp, "output_text", None)
+            if not answer:
+                answer = str(resp)
+
+            st.session_state.chat.append({"role": "assistant", "content": answer})
+            with st.chat_message("assistant"):
+                st.markdown(answer)
+
+        except Exception as e:
+            st.error(f"AI error: {e}")
