@@ -4,7 +4,7 @@ import streamlit as st
 from matplotlib.ticker import FuncFormatter
 
 # ----------------------------
-# Helpers (same logic as yours)
+# Helpers
 # ----------------------------
 def _find_date_column(df, default="Date"):
     if default in df.columns:
@@ -39,14 +39,19 @@ def safe_margin_pct(net_profit, revenue):
     return (net_profit / denom) * 100
 
 # ----------------------------
-# Core chart function (Streamlit-friendly)
+# Core chart function
 # ----------------------------
-def create_visualization(Sales_base: pd.DataFrame, Cost_dated: pd.DataFrame,
-                         cost_method="Moving Average", view_type="Month", metric_type="Amount"):
-
-    # ----- Load Sales -----
-    sales_date_col = _find_date_column(Sales_base, default="Date")
+def create_visualization(
+    Sales_base: pd.DataFrame,
+    Cost_dated: pd.DataFrame,
+    cost_method="Moving Average",
+    view_type="Month",
+    metric_type="Amount",
+):
+    # ----- Sales -----
     Sales_base = Sales_base.copy()
+    sales_date_col = _find_date_column(Sales_base, default="Date")
+
     Sales_base["Date"] = parse_dates_no_warning(Sales_base[sales_date_col])
     Sales_base["YearMonth"] = Sales_base["Date"].dt.to_period("M")
 
@@ -54,29 +59,41 @@ def create_visualization(Sales_base: pd.DataFrame, Cost_dated: pd.DataFrame,
     Sales_base["UnitPrice"] = pd.to_numeric(Sales_base["UnitPrice"], errors="coerce")
     Sales_base["Revenue"] = Sales_base["Qty"] * Sales_base["UnitPrice"]
 
-    # ----- Load Cost -----
-    cost_date_col = _find_date_column(Cost_dated, default="Date")
+    # ----- Cost -----
     Cost_dated = Cost_dated.copy()
+    cost_date_col = _find_date_column(Cost_dated, default="Date")
+
     Cost_dated["Date"] = parse_dates_no_warning(Cost_dated[cost_date_col])
     Cost_dated["YearMonth"] = Cost_dated["Date"].dt.to_period("M")
     Cost_dated["CostPerUnit"] = pd.to_numeric(Cost_dated["CostPerUnit"], errors="coerce")
 
-    # ----- Continuous month range over SALES period -----
+    # ----- Full month range over SALES -----
     sales_months = Sales_base["YearMonth"].dropna()
+    if sales_months.empty:
+        raise ValueError("Sales data has no valid dates to build a month range.")
     full_month_range = pd.period_range(sales_months.min(), sales_months.max(), freq="M")
     months_ts = full_month_range.to_timestamp()  # DatetimeIndex
 
     # ----- Monthly cost + cumulative moving average (count ALL months) -----
     monthly_cost = (
-        Cost_dated.groupby("YearMonth", as_index=False)["CostPerUnit"].mean().set_index("YearMonth")
+        Cost_dated.groupby("YearMonth", as_index=False)["CostPerUnit"]
+        .mean()
+        .set_index("YearMonth")
     )
-    monthly_cost = monthly_cost.reindex(full_month_range)
-    cost_values = monthly_cost["CostPerUnit"].astype("float64").fillna(0.0)
 
+    monthly_cost = monthly_cost.reindex(full_month_range)
+    monthly_cost.index.name = "YearMonth"  # IMPORTANT: keep name after reindex
+
+    cost_values = monthly_cost["CostPerUnit"].astype("float64").fillna(0.0)
     cum_sum = cost_values.cumsum()
     month_number = pd.Series(range(1, len(cost_values) + 1), index=monthly_cost.index, dtype="float64")
     monthly_cost["MovingAvgCost"] = (cum_sum / month_number).astype("float64")
-    moving_avg_cost_df = monthly_cost.reset_index()[["YearMonth", "MovingAvgCost"]]
+
+    tmp = monthly_cost.reset_index()
+    # Safety: if pandas calls it 'index' instead of 'YearMonth'
+    if "YearMonth" not in tmp.columns and "index" in tmp.columns:
+        tmp = tmp.rename(columns={"index": "YearMonth"})
+    moving_avg_cost_df = tmp[["YearMonth", "MovingAvgCost"]]
 
     # ----- Apply cost method (needed for ProfitMargin%) -----
     if cost_method == "Total Average":
@@ -103,8 +120,11 @@ def create_visualization(Sales_base: pd.DataFrame, Cost_dated: pd.DataFrame,
             region_qty["Region"] = pd.Categorical(region_qty["Region"], categories=region_order, ordered=True)
             region_qty = region_qty.sort_values("Region")
 
-            region_amt = (Sales_temp.groupby("Region", dropna=False)
-                          .agg({"Revenue": "sum", "NetProfit": "sum"}).reset_index())
+            region_amt = (
+                Sales_temp.groupby("Region", dropna=False)
+                .agg({"Revenue": "sum", "NetProfit": "sum"})
+                .reset_index()
+            )
             region_amt["ProfitMargin"] = safe_margin_pct(region_amt["NetProfit"], region_amt["Revenue"])
             region_amt["Region"] = pd.Categorical(region_amt["Region"], categories=region_order, ordered=True)
             region_amt = region_amt.sort_values("Region")
@@ -117,7 +137,7 @@ def create_visualization(Sales_base: pd.DataFrame, Cost_dated: pd.DataFrame,
                 region_qty["Qty"].fillna(0.0),
                 alpha=0.85,
                 color=[revenue_colors[r] for r in region_order],
-                label="Units (Qty)"
+                label="Units (Qty)",
             )
 
             for i, val in enumerate(region_qty["Qty"].fillna(0.0).values):
@@ -134,9 +154,13 @@ def create_visualization(Sales_base: pd.DataFrame, Cost_dated: pd.DataFrame,
 
             ax2 = ax1.twinx()
             ax2.plot(
-                x_pos, region_amt["ProfitMargin"],
-                marker="o", label="Profit Margin (%)",
-                color="#2E8B57", linewidth=3, markersize=8
+                x_pos,
+                region_amt["ProfitMargin"],
+                marker="o",
+                label="Profit Margin (%)",
+                color="#2E8B57",
+                linewidth=3,
+                markersize=8,
             )
             ax2.set_ylabel("Profit Margin (%)", fontsize=12, fontweight="bold")
             ax2.set_ylim(-100, 100)
@@ -146,17 +170,23 @@ def create_visualization(Sales_base: pd.DataFrame, Cost_dated: pd.DataFrame,
             lines2, labels2 = ax2.get_legend_handles_labels()
             ax1.legend(lines1 + lines2, labels1 + labels2, loc="upper left", fontsize=9, ncol=2)
 
-            plt.title(f"Units Sold and Profit Margin by Region (Cost Method: {cost_method})",
-                      fontsize=16, fontweight="bold")
+            plt.title(
+                f"Units Sold and Profit Margin by Region (Cost Method: {cost_method})",
+                fontsize=16,
+                fontweight="bold",
+            )
             plt.tight_layout()
             return fig
 
-        # Month view
+        # Month view: Qty bars by region, ProfitMargin% line overall
         region_month_qty = Sales_temp.groupby(["Region", "YearMonth"], dropna=False)["Qty"].sum().reset_index()
         region_month_qty["YearMonth"] = region_month_qty["YearMonth"].dt.to_timestamp()
 
-        monthly_amt = (Sales_temp.groupby("YearMonth", dropna=False)
-                       .agg({"Revenue": "sum", "NetProfit": "sum"}).reset_index())
+        monthly_amt = (
+            Sales_temp.groupby("YearMonth", dropna=False)
+            .agg({"Revenue": "sum", "NetProfit": "sum"})
+            .reset_index()
+        )
         monthly_amt["YearMonth"] = monthly_amt["YearMonth"].dt.to_timestamp()
         monthly_amt = monthly_amt.set_index("YearMonth").reindex(months_ts, fill_value=0).reset_index()
         monthly_amt.rename(columns={"index": "YearMonth"}, inplace=True)
@@ -166,8 +196,11 @@ def create_visualization(Sales_base: pd.DataFrame, Cost_dated: pd.DataFrame,
         x_pos = list(range(len(months_ts)))
 
         all_combinations = pd.MultiIndex.from_product([region_order, months_ts], names=["Region", "YearMonth"])
-        complete_qty = (region_month_qty.set_index(["Region", "YearMonth"])
-                        .reindex(all_combinations, fill_value=0).reset_index())
+        complete_qty = (
+            region_month_qty.set_index(["Region", "YearMonth"])
+            .reindex(all_combinations, fill_value=0)
+            .reset_index()
+        )
 
         fig, ax1 = plt.subplots(figsize=(18, 8))
 
@@ -175,14 +208,26 @@ def create_visualization(Sales_base: pd.DataFrame, Cost_dated: pd.DataFrame,
             rd = complete_qty[complete_qty["Region"] == region].sort_values("YearMonth")
             x_offset = [x + (i * bar_width) for x in x_pos]
 
-            bars = ax1.bar(x_offset, rd["Qty"], width=bar_width,
-                           label=f"{region} Units", color=revenue_colors[region], alpha=0.85)
+            bars = ax1.bar(
+                x_offset,
+                rd["Qty"],
+                width=bar_width,
+                label=f"{region} Units",
+                color=revenue_colors[region],
+                alpha=0.85,
+            )
 
             for bar, val in zip(bars, rd["Qty"]):
                 if val > 0:
-                    ax1.text(bar.get_x() + bar.get_width()/2, bar.get_height(),
-                             format_compact(val), ha="center", va="bottom",
-                             fontsize=7, fontweight="bold")
+                    ax1.text(
+                        bar.get_x() + bar.get_width() / 2,
+                        bar.get_height(),
+                        format_compact(val),
+                        ha="center",
+                        va="bottom",
+                        fontsize=7,
+                        fontweight="bold",
+                    )
 
         ax1.set_xlabel("Month", fontsize=12, fontweight="bold")
         ax1.set_ylabel("Units Sold (Qty)", fontsize=12, fontweight="bold")
@@ -192,9 +237,15 @@ def create_visualization(Sales_base: pd.DataFrame, Cost_dated: pd.DataFrame,
         ax1.yaxis.set_major_formatter(FuncFormatter(lambda x, pos: f"{x:,.0f}"))
 
         ax2 = ax1.twinx()
-        ax2.plot([x + bar_width * 1.5 for x in x_pos], monthly_amt["ProfitMargin"],
-                 marker="o", label="Profit Margin (%)",
-                 color="#2E8B57", linewidth=3, markersize=8)
+        ax2.plot(
+            [x + bar_width * 1.5 for x in x_pos],
+            monthly_amt["ProfitMargin"],
+            marker="o",
+            label="Profit Margin (%)",
+            color="#2E8B57",
+            linewidth=3,
+            markersize=8,
+        )
         ax2.set_ylabel("Profit Margin (%)", fontsize=12, fontweight="bold")
         ax2.set_ylim(-100, 100)
         ax2.yaxis.set_major_formatter(FuncFormatter(lambda x, pos: f"{x:.0f}%"))
@@ -203,17 +254,23 @@ def create_visualization(Sales_base: pd.DataFrame, Cost_dated: pd.DataFrame,
         lines2, labels2 = ax2.get_legend_handles_labels()
         ax1.legend(lines1 + lines2, labels1 + labels2, loc="upper left", fontsize=9, ncol=2)
 
-        plt.title(f"Units Sold and Profit Margin by Region per Month (Cost Method: {cost_method})",
-                  fontsize=16, fontweight="bold")
+        plt.title(
+            f"Units Sold and Profit Margin by Region per Month (Cost Method: {cost_method})",
+            fontsize=16,
+            fontweight="bold",
+        )
         plt.tight_layout()
         return fig
 
     # =========================================================
-    # AMOUNT MODE (your original)
+    # AMOUNT MODE
     # =========================================================
     if view_type == "Region":
-        region_summary = (Sales_temp.groupby("Region", dropna=False)
-                          .agg({"Revenue": "sum", "TotalCost": "sum", "NetProfit": "sum"}).reset_index())
+        region_summary = (
+            Sales_temp.groupby("Region", dropna=False)
+            .agg({"Revenue": "sum", "TotalCost": "sum", "NetProfit": "sum"})
+            .reset_index()
+        )
         region_summary["ProfitMargin"] = safe_margin_pct(region_summary["NetProfit"], region_summary["Revenue"])
         region_summary["Region"] = pd.Categorical(region_summary["Region"], categories=region_order, ordered=True)
         region_summary = region_summary.sort_values("Region")
@@ -230,21 +287,45 @@ def create_visualization(Sales_base: pd.DataFrame, Cost_dated: pd.DataFrame,
             revenue_val = float(rd["Revenue"].values[0])
             cost_val = float(rd["TotalCost"].values[0])
 
-            ax1.bar(i, revenue_val / 1e6, width=bar_width * 2,
-                    label=f"{region} Revenue" if i == 0 else "",
-                    color=revenue_colors[region], alpha=0.8)
+            ax1.bar(
+                i,
+                revenue_val / 1e6,
+                width=bar_width * 2,
+                label=f"{region} Revenue" if i == 0 else "",
+                color=revenue_colors[region],
+                alpha=0.8,
+            )
             if revenue_val > 0:
-                ax1.text(i, revenue_val / 1e6, format_compact(revenue_val),
-                         ha="center", va="bottom", fontsize=9, fontweight="bold",
-                         color=revenue_colors[region])
+                ax1.text(
+                    i,
+                    revenue_val / 1e6,
+                    format_compact(revenue_val),
+                    ha="center",
+                    va="bottom",
+                    fontsize=9,
+                    fontweight="bold",
+                    color=revenue_colors[region],
+                )
 
-            ax1.bar(i, -cost_val / 1e6, width=bar_width * 2,
-                    label=f"{region} Cost" if i == 0 else "",
-                    color=cost_colors[region], alpha=0.7)
+            ax1.bar(
+                i,
+                -cost_val / 1e6,
+                width=bar_width * 2,
+                label=f"{region} Cost" if i == 0 else "",
+                color=cost_colors[region],
+                alpha=0.7,
+            )
             if cost_val > 0:
-                ax1.text(i, -cost_val / 1e6, format_compact(cost_val),
-                         ha="center", va="top", fontsize=9, fontweight="bold",
-                         color=cost_colors[region])
+                ax1.text(
+                    i,
+                    -cost_val / 1e6,
+                    format_compact(cost_val),
+                    ha="center",
+                    va="top",
+                    fontsize=9,
+                    fontweight="bold",
+                    color=cost_colors[region],
+                )
 
         ax1.axhline(y=0, color="black", linewidth=1.5)
         ax1.set_xlabel("Region", fontsize=12, fontweight="bold")
@@ -254,9 +335,15 @@ def create_visualization(Sales_base: pd.DataFrame, Cost_dated: pd.DataFrame,
         ax1.grid(True, axis="y", alpha=0.3)
 
         ax2 = ax1.twinx()
-        ax2.plot(x_pos, region_summary["ProfitMargin"],
-                 marker="o", label="Profit Margin (%)",
-                 color="#2E8B57", linewidth=3, markersize=8)
+        ax2.plot(
+            x_pos,
+            region_summary["ProfitMargin"],
+            marker="o",
+            label="Profit Margin (%)",
+            color="#2E8B57",
+            linewidth=3,
+            markersize=8,
+        )
         ax2.set_ylabel("Profit Margin (%)", fontsize=12, fontweight="bold")
         ax2.set_ylim(-100, 100)
         ax2.yaxis.set_major_formatter(FuncFormatter(lambda x, pos: f"{x:.0f}%"))
@@ -265,18 +352,27 @@ def create_visualization(Sales_base: pd.DataFrame, Cost_dated: pd.DataFrame,
         lines2, labels2 = ax2.get_legend_handles_labels()
         ax1.legend(lines1 + lines2, labels1 + labels2, loc="upper left", fontsize=9, ncol=2)
 
-        plt.title(f"Revenue, Cost, and Profit Margin by Region (Cost Method: {cost_method})",
-                  fontsize=16, fontweight="bold")
+        plt.title(
+            f"Revenue, Cost, and Profit Margin by Region (Cost Method: {cost_method})",
+            fontsize=16,
+            fontweight="bold",
+        )
         plt.tight_layout()
         return fig
 
     # Amount Month view
-    region_month_summary = (Sales_temp.groupby(["Region", "YearMonth"], dropna=False)
-                            .agg({"Revenue": "sum", "TotalCost": "sum", "NetProfit": "sum"}).reset_index())
+    region_month_summary = (
+        Sales_temp.groupby(["Region", "YearMonth"], dropna=False)
+        .agg({"Revenue": "sum", "TotalCost": "sum", "NetProfit": "sum"})
+        .reset_index()
+    )
     region_month_summary["YearMonth"] = region_month_summary["YearMonth"].dt.to_timestamp()
 
-    monthly_summary = (Sales_temp.groupby("YearMonth", dropna=False)
-                       .agg({"Revenue": "sum", "TotalCost": "sum", "NetProfit": "sum"}).reset_index())
+    monthly_summary = (
+        Sales_temp.groupby("YearMonth", dropna=False)
+        .agg({"Revenue": "sum", "TotalCost": "sum", "NetProfit": "sum"})
+        .reset_index()
+    )
     monthly_summary["YearMonth"] = monthly_summary["YearMonth"].dt.to_timestamp()
     monthly_summary = monthly_summary.set_index("YearMonth").reindex(months_ts, fill_value=0).reset_index()
     monthly_summary.rename(columns={"index": "YearMonth"}, inplace=True)
@@ -286,8 +382,11 @@ def create_visualization(Sales_base: pd.DataFrame, Cost_dated: pd.DataFrame,
     x_pos = list(range(len(months_ts)))
 
     all_combinations = pd.MultiIndex.from_product([region_order, months_ts], names=["Region", "YearMonth"])
-    complete_data = (region_month_summary.set_index(["Region", "YearMonth"])
-                     .reindex(all_combinations, fill_value=0).reset_index())
+    complete_data = (
+        region_month_summary.set_index(["Region", "YearMonth"])
+        .reindex(all_combinations, fill_value=0)
+        .reset_index()
+    )
 
     fig, ax1 = plt.subplots(figsize=(18, 8))
 
@@ -295,21 +394,47 @@ def create_visualization(Sales_base: pd.DataFrame, Cost_dated: pd.DataFrame,
         rd = complete_data[complete_data["Region"] == region].sort_values("YearMonth")
         x_offset = [x + (i * bar_width) for x in x_pos]
 
-        revenue_bars = ax1.bar(x_offset, rd["Revenue"] / 1e6, width=bar_width,
-                               label=f"{region} Revenue", color=revenue_colors[region], alpha=0.8)
+        revenue_bars = ax1.bar(
+            x_offset,
+            rd["Revenue"] / 1e6,
+            width=bar_width,
+            label=f"{region} Revenue",
+            color=revenue_colors[region],
+            alpha=0.8,
+        )
         for bar, val in zip(revenue_bars, rd["Revenue"]):
             if val > 0:
-                ax1.text(bar.get_x() + bar.get_width()/2, bar.get_height(),
-                         format_compact(val), ha="center", va="bottom",
-                         fontsize=7, fontweight="bold", color=revenue_colors[region])
+                ax1.text(
+                    bar.get_x() + bar.get_width() / 2,
+                    bar.get_height(),
+                    format_compact(val),
+                    ha="center",
+                    va="bottom",
+                    fontsize=7,
+                    fontweight="bold",
+                    color=revenue_colors[region],
+                )
 
-        cost_bars = ax1.bar(x_offset, -rd["TotalCost"] / 1e6, width=bar_width,
-                            label=f"{region} Cost", color=cost_colors[region], alpha=0.7)
+        cost_bars = ax1.bar(
+            x_offset,
+            -rd["TotalCost"] / 1e6,
+            width=bar_width,
+            label=f"{region} Cost",
+            color=cost_colors[region],
+            alpha=0.7,
+        )
         for bar, val in zip(cost_bars, rd["TotalCost"]):
             if val > 0:
-                ax1.text(bar.get_x() + bar.get_width()/2, bar.get_height(),
-                         format_compact(val), ha="center", va="top",
-                         fontsize=7, fontweight="bold", color=cost_colors[region])
+                ax1.text(
+                    bar.get_x() + bar.get_width() / 2,
+                    bar.get_height(),
+                    format_compact(val),
+                    ha="center",
+                    va="top",
+                    fontsize=7,
+                    fontweight="bold",
+                    color=cost_colors[region],
+                )
 
     ax1.axhline(y=0, color="black", linewidth=1.5)
     ax1.set_xlabel("Month", fontsize=12, fontweight="bold")
@@ -319,9 +444,15 @@ def create_visualization(Sales_base: pd.DataFrame, Cost_dated: pd.DataFrame,
     ax1.grid(True, axis="y", alpha=0.3)
 
     ax2 = ax1.twinx()
-    ax2.plot([x + bar_width * 1.5 for x in x_pos], monthly_summary["ProfitMargin"],
-             marker="o", label="Profit Margin (%)",
-             color="#2E8B57", linewidth=3, markersize=8)
+    ax2.plot(
+        [x + bar_width * 1.5 for x in x_pos],
+        monthly_summary["ProfitMargin"],
+        marker="o",
+        label="Profit Margin (%)",
+        color="#2E8B57",
+        linewidth=3,
+        markersize=8,
+    )
     ax2.set_ylabel("Profit Margin (%)", fontsize=12, fontweight="bold")
     ax2.set_ylim(-100, 100)
     ax2.yaxis.set_major_formatter(FuncFormatter(lambda x, pos: f"{x:.0f}%"))
@@ -330,8 +461,11 @@ def create_visualization(Sales_base: pd.DataFrame, Cost_dated: pd.DataFrame,
     lines2, labels2 = ax2.get_legend_handles_labels()
     ax1.legend(lines1 + lines2, labels1 + labels2, loc="upper left", fontsize=9, ncol=2)
 
-    plt.title(f"Revenue, Cost, and Profit Margin by Region per Month (Cost Method: {cost_method})",
-              fontsize=16, fontweight="bold")
+    plt.title(
+        f"Revenue, Cost, and Profit Margin by Region per Month (Cost Method: {cost_method})",
+        fontsize=16,
+        fontweight="bold",
+    )
     plt.tight_layout()
     return fig
 
