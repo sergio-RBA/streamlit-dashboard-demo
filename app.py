@@ -1,11 +1,34 @@
+import io
+from pathlib import Path
+
 import pandas as pd
 import matplotlib.pyplot as plt
 import streamlit as st
 from matplotlib.ticker import FuncFormatter
 
-# ----------------------------
-# Helpers
-# ----------------------------
+# ============================
+# Persist uploads (demo/local)
+# ============================
+UPLOAD_DIR = Path("uploads")
+UPLOAD_DIR.mkdir(exist_ok=True)
+
+def _save_bytes(filename: str, data: bytes) -> None:
+    (UPLOAD_DIR / filename).write_bytes(data)
+
+def _load_bytes(filename: str) -> bytes | None:
+    p = UPLOAD_DIR / filename
+    return p.read_bytes() if p.exists() else None
+
+def _clear_saved_uploads() -> None:
+    for fn in ["Sales.csv", "Cost_dated.csv"]:
+        p = UPLOAD_DIR / fn
+        if p.exists():
+            p.unlink()
+
+
+# ============================
+# Helpers (from your notebook)
+# ============================
 def _find_date_column(df, default="Date"):
     if default in df.columns:
         return default
@@ -38,9 +61,10 @@ def safe_margin_pct(net_profit, revenue):
     denom = revenue.where(revenue != 0)
     return (net_profit / denom) * 100
 
-# ----------------------------
-# Core chart function
-# ----------------------------
+
+# ============================
+# Dashboard chart builder
+# ============================
 def create_visualization(
     Sales_base: pd.DataFrame,
     Cost_dated: pd.DataFrame,
@@ -468,35 +492,174 @@ def create_visualization(
     plt.tight_layout()
     return fig
 
-# ----------------------------
+
+# ============================
 # Streamlit UI
-# ----------------------------
-st.set_page_config(page_title="Dashboard", layout="wide")
+# ============================
+st.set_page_config(page_title="Sales/Cost Dashboard", layout="wide")
 st.title("Sales / Cost Dashboard")
 
+# Sidebar controls
 st.sidebar.header("Controls")
 cost_method = st.sidebar.selectbox("Cost Method", ["Moving Average", "Total Average"])
 view_type = st.sidebar.selectbox("View Type", ["Month", "Region"])
 metric_type = st.sidebar.selectbox("Metric", ["Amount", "Count"])
 
 st.sidebar.divider()
-st.sidebar.subheader("Upload data")
-sales_file = st.sidebar.file_uploader("Sales.csv", type=["csv"])
-cost_file = st.sidebar.file_uploader("Cost_dated.csv", type=["csv"])
+st.sidebar.subheader("Upload data (persists until cleared)")
 
-if not sales_file or not cost_file:
-    st.info("Upload both Sales.csv and Cost_dated.csv to render the dashboard.")
+if st.sidebar.button("Clear saved uploads"):
+    _clear_saved_uploads()
+    st.session_state.pop("sales_bytes", None)
+    st.session_state.pop("cost_bytes", None)
+    st.rerun()
+
+sales_up = st.sidebar.file_uploader("Sales.csv", type=["csv"], key="sales_uploader")
+cost_up = st.sidebar.file_uploader("Cost_dated.csv", type=["csv"], key="cost_uploader")
+
+# Persist Sales bytes
+if sales_up is not None:
+    st.session_state["sales_bytes"] = sales_up.getvalue()
+    _save_bytes("Sales.csv", st.session_state["sales_bytes"])
+elif "sales_bytes" not in st.session_state:
+    b = _load_bytes("Sales.csv")
+    if b is not None:
+        st.session_state["sales_bytes"] = b
+
+# Persist Cost bytes
+if cost_up is not None:
+    st.session_state["cost_bytes"] = cost_up.getvalue()
+    _save_bytes("Cost_dated.csv", st.session_state["cost_bytes"])
+elif "cost_bytes" not in st.session_state:
+    b = _load_bytes("Cost_dated.csv")
+    if b is not None:
+        st.session_state["cost_bytes"] = b
+
+if "sales_bytes" not in st.session_state or "cost_bytes" not in st.session_state:
+    st.info("Upload both files once. They’ll stay loaded until you click **Clear saved uploads**.")
     st.stop()
 
-Sales_base = pd.read_csv(sales_file)
-Cost_dated = pd.read_csv(cost_file)
+Sales_base = pd.read_csv(io.BytesIO(st.session_state["sales_bytes"]))
+Cost_dated = pd.read_csv(io.BytesIO(st.session_state["cost_bytes"]))
 
+# Preview
 with st.expander("Preview: Sales.csv"):
-    st.dataframe(Sales_base.head(20), use_container_width=True)
+    st.dataframe(Sales_base.head(30), use_container_width=True)
 
 with st.expander("Preview: Cost_dated.csv"):
-    st.dataframe(Cost_dated.head(20), use_container_width=True)
+    st.dataframe(Cost_dated.head(30), use_container_width=True)
 
+# ============================
+# AI Assistant (pinned input)
+# ============================
+st.header("AI Assistant")
+
+if "chat" not in st.session_state:
+    st.session_state.chat = []
+
+# Render chat history in a fixed-height box (messages scroll, input stays pinned)
+chat_box = st.container(height=280, border=True)
+with chat_box:
+    for m in st.session_state.chat:
+        with st.chat_message(m["role"]):
+            st.markdown(m["content"])
+
+user_msg = st.chat_input("Ask a question about the data… (e.g., “Which month has the most sales?”)")
+
+if user_msg:
+    st.session_state.chat.append({"role": "user", "content": user_msg})
+    with chat_box:
+        with st.chat_message("user"):
+            st.markdown(user_msg)
+
+    # Build a small, useful summary for the model (includes monthly totals)
+    try:
+        s = Sales_base.copy()
+        s_date_col = _find_date_column(s, default="Date")
+        s["Date"] = parse_dates_no_warning(s[s_date_col])
+        s["YearMonth"] = s["Date"].dt.to_period("M").astype(str)
+
+        s["Qty"] = pd.to_numeric(s["Qty"], errors="coerce").fillna(0.0)
+        s["UnitPrice"] = pd.to_numeric(s["UnitPrice"], errors="coerce")
+        s["Revenue"] = s["Qty"] * s["UnitPrice"]
+
+        monthly_sales = (
+            s.groupby("YearMonth", dropna=False)["Revenue"].sum()
+            .reset_index()
+            .sort_values("Revenue", ascending=False)
+            .head(24)
+            .to_dict(orient="records")
+        )
+    except Exception:
+        monthly_sales = []
+
+    summary = {
+        "toggles": {"cost_method": cost_method, "view_type": view_type, "metric_type": metric_type},
+        "sales_columns": list(Sales_base.columns),
+        "cost_columns": list(Cost_dated.columns),
+        "sales_rows": int(len(Sales_base)),
+        "cost_rows": int(len(Cost_dated)),
+        "monthly_sales_top": monthly_sales,  # helps answer “which month has most sales”
+    }
+
+    if "OPENAI_API_KEY" not in st.secrets:
+        msg = "Add `OPENAI_API_KEY` in Streamlit **Secrets** to enable chat responses."
+        st.session_state.chat.append({"role": "assistant", "content": msg})
+        with chat_box:
+            with st.chat_message("assistant"):
+                st.markdown(msg)
+    else:
+        try:
+            from openai import OpenAI
+
+            client = OpenAI(api_key=st.secrets["OPENAI_API_KEY"])
+            model = st.secrets.get("OPENAI_MODEL", "gpt-5.1")
+
+            system = (
+                "You are a data assistant for a sales/cost dashboard. "
+                "Answer using ONLY the provided summary. "
+                "If you need missing columns, say exactly which."
+            )
+
+            resp = client.responses.create(
+                model=model,
+                input=[
+                    {"role": "system", "content": system},
+                    {"role": "user", "content": f"QUESTION:\n{user_msg}\n\nSUMMARY:\n{summary}"},
+                ],
+            )
+
+            answer = getattr(resp, "output_text", None) or "No response text returned."
+            st.session_state.chat.append({"role": "assistant", "content": answer})
+            with chat_box:
+                with st.chat_message("assistant"):
+                    st.markdown(answer)
+
+        except Exception as e:
+            err = str(e)
+
+            # Friendly invalid-key handling
+            if "401" in err or "invalid_api_key" in err:
+                friendly = (
+                    "Your OpenAI key is invalid (401). In Streamlit Secrets, set:\n\n"
+                    "```\nOPENAI_API_KEY = \"sk-...your real key...\"\nOPENAI_MODEL = \"gpt-5.1\"\n```\n"
+                    "Common issue: you left the placeholder `sk-xxxx` or copied an incomplete key."
+                )
+                st.session_state.chat.append({"role": "assistant", "content": friendly})
+                with chat_box:
+                    with st.chat_message("assistant"):
+                        st.markdown(friendly)
+            else:
+                st.session_state.chat.append({"role": "assistant", "content": f"AI error: {e}"})
+                with chat_box:
+                    with st.chat_message("assistant"):
+                        st.markdown(f"AI error: {e}")
+
+st.divider()
+
+# ============================
+# Dashboard chart
+# ============================
 try:
     fig = create_visualization(
         Sales_base=Sales_base,
@@ -508,78 +671,3 @@ try:
     st.pyplot(fig, clear_figure=True, use_container_width=True)
 except Exception as e:
     st.error(f"Dashboard error: {e}")
-    st.stop()
-
-# ----------------------------
-# AI Chat (OpenAI)
-# ----------------------------
-st.divider()
-st.header("AI Assistant")
-
-# NOTE:
-# 1) Add "openai" to requirements.txt
-# 2) In Streamlit Cloud -> App -> Settings -> Secrets, add:
-#    OPENAI_API_KEY="your_key"
-#    OPENAI_MODEL="gpt-4.1-mini"   (or whatever you want)
-if "OPENAI_API_KEY" not in st.secrets:
-    st.info("To enable chat: add OPENAI_API_KEY in Streamlit Secrets (App settings → Secrets).")
-else:
-    from openai import OpenAI
-
-    client = OpenAI(api_key=st.secrets["OPENAI_API_KEY"])
-    model = st.secrets.get("OPENAI_MODEL", "gpt-4.1-mini")
-
-    if "chat" not in st.session_state:
-        st.session_state.chat = []
-
-    for m in st.session_state.chat:
-        with st.chat_message(m["role"]):
-            st.markdown(m["content"])
-
-    # IMPORTANT: only ONE st.chat_input per page, and keep it in the main area (not sidebar)
-    user_msg = st.chat_input("Ask a question about the dashboard/data…")
-
-    if user_msg:
-        st.session_state.chat.append({"role": "user", "content": user_msg})
-        with st.chat_message("user"):
-            st.markdown(user_msg)
-
-        # Keep it lightweight: send summary + samples (not whole CSV)
-        summary = {
-            "sales_columns": list(Sales_base.columns),
-            "cost_columns": list(Cost_dated.columns),
-            "sales_rows": int(len(Sales_base)),
-            "cost_rows": int(len(Cost_dated)),
-            "sales_head": Sales_base.head(25).to_dict(orient="records"),
-            "cost_head": Cost_dated.head(25).to_dict(orient="records"),
-            "sales_numeric_describe": Sales_base.select_dtypes("number").describe().to_dict(),
-            "cost_numeric_describe": Cost_dated.select_dtypes("number").describe().to_dict(),
-            "toggles": {"cost_method": cost_method, "view_type": view_type, "metric_type": metric_type},
-        }
-
-        system = (
-            "You are a data assistant for a sales/cost dashboard. "
-            "Answer using only the provided data summary. "
-            "If the question needs extra columns/rows not included, ask for what you need."
-        )
-
-        try:
-            resp = client.responses.create(
-                model=model,
-                input=[
-                    {"role": "system", "content": system},
-                    {"role": "user", "content": f"QUESTION:\n{user_msg}\n\nDATA SUMMARY:\n{summary}"},
-                ],
-            )
-
-            # Robust output extraction
-            answer = getattr(resp, "output_text", None)
-            if not answer:
-                answer = str(resp)
-
-            st.session_state.chat.append({"role": "assistant", "content": answer})
-            with st.chat_message("assistant"):
-                st.markdown(answer)
-
-        except Exception as e:
-            st.error(f"AI error: {e}")
